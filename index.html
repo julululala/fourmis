@@ -20,6 +20,7 @@
     font-variant-numeric: oldstyle-nums;
   }
   #compte { right: 18px; text-align: right; }
+  @media (max-width: 600px) { .txt { font-size: 18px; line-height: 22px; } }   /* mobile : un peu plus grand */
 </style>
 </head>
 <body>
@@ -393,7 +394,8 @@
 
   /* ---------- dirigeable ---------- */
   function makeAirship() {
-    const w = Math.round(Math.max(100, Math.min(W * 0.2, 180))), h = Math.round(w * 0.32);
+    // mobile (écran étroit) : un dirigeable un peu plus grand
+    const w = Math.round(W <= 600 ? Math.min(W * 0.36, 150) : Math.max(100, Math.min(W * 0.2, 180))), h = Math.round(w * 0.32);
     const cw = Math.ceil(w * 1.25), ch = Math.ceil(h * 1.95);
     const can = document.createElement('canvas');
     can.width = cw * dpr; can.height = ch * dpr;
