@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ça ne sert à rien</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital@0;1&display=swap" rel="stylesheet">
+<!-- seulement les glyphes du slogan du dirigeable -->
+<link href="https://fonts.googleapis.com/css2?family=Dokdo&text=%EC%9D%BC%EC%8B%AC%20%EB%8B%A8%EA%B2%B0&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #fff; overflow: hidden; }
+  body { cursor: crosshair; -webkit-tap-highlight-color: transparent; }
+  canvas { display: block; touch-action: manipulation; }
+  .txt {
+    position: fixed; top: 14px; font-family: 'EB Garamond', Garamond, Georgia, serif; color: #000;
+    user-select: none; pointer-events: none;
+    font-size: 16px; line-height: 20px;
+    font-variant-numeric: oldstyle-nums;
+  }
+  #compte { right: 18px; text-align: right; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div class="txt" id="compte"></div>
+<script>
+(() => {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const compte = document.getElementById('compte');
+  const CELL = 5;                 // résolution du masque des bâtiments (px)
+  const MAX_ANTS = 250;
+  const R = (a, b) => a + Math.random() * (b - a);
+  const pick = arr => arr[(Math.random() * arr.length) | 0];
+
+  let W, H, dpr, groundY, groundPts, pebbles, sun, airship;
+  const SLOGAN = '일심 단결';
+  const SUN_CYCLE = 360;          // secondes pour un aller-retour du soleil
+  const mix = (a, b, t) => {
+    const ca = parseInt(a.slice(1), 16), cb = parseInt(b.slice(1), 16);
+    const ch = s => Math.round(((ca >> s) & 255) * (1 - t) + ((cb >> s) & 255) * t);
+    return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+  };
+  let slots = [], ants = [], crumbs = [], hill;
+  let eaten = 0, now = 0, nextHatch = 0, lastCount = '';
+
+  /* ---------- trait tremblé façon dessin d'enfant ---------- */
+  function wpath(c, pts, closed, j = 1.2) {
+    c.beginPath();
+    const n = pts.length, segs = closed ? n : n - 1;
+    for (let i = 0; i < segs; i++) {
+      const [x1, y1] = pts[i], [x2, y2] = pts[(i + 1) % n];
+      const k = Math.max(1, Math.round(Math.hypot(x2 - x1, y2 - y1) / 12));
+      if (i === 0) c.moveTo(x1 + R(-j, j), y1 + R(-j, j));
+      for (let s = 1; s <= k; s++) {
+        const t = s / k;
+        c.lineTo(x1 + (x2 - x1) * t + R(-j, j), y1 + (y2 - y1) * t + R(-j, j));
+      }
+    }
+    c.stroke();
+  }
+  const sketch = (c, pts, closed) => { wpath(c, pts, closed, 1.1); wpath(c, pts, closed, 1.7); };
+  const rectPts = (x, y, w, h) => [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+
+  /* ---------- bâtiments ---------- */
+  function makeBuilding(slot) {
+    const type = pick(['maison', 'maison', 'tour', 'usine', 'immeuble', 'immeuble']);
+    const w = Math.round(R(slot.w * 0.75, slot.w));
+    const maxH = groundY - 110;
+    let h = { maison: R(60, 100), tour: R(190, 330), usine: R(70, 110), immeuble: R(120, 230) }[type];
+    h = Math.max(50, Math.min(h, maxH));
+    const top = 95, pad = 12;
+    const ow = w + pad * 2, oh = h + top + 2;
+    const ox = Math.round(slot.x + (slot.w - w) / 2 - pad), oy = Math.round(groundY - h - top);
+
+    const can = document.createElement('canvas');
+    can.width = Math.ceil(ow * dpr); can.height = Math.ceil(oh * dpr);
+    const c = can.getContext('2d');
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.lineWidth = 2.2; c.lineJoin = c.lineCap = 'round'; c.strokeStyle = '#000';
+
+    const x0 = pad, x1 = pad + w, xm = pad + w / 2, yt = top, yb = top + h;
+    const shape = (pts, fill = '#fff') => {
+      c.fillStyle = fill; c.beginPath();
+      pts.forEach((p, i) => i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1]));
+      c.closePath(); c.fill(); sketch(c, pts, true);
+    };
+    const win = (x, y, ww, wh) => {
+      const dark = Math.random() < 0.35;
+      shape(rectPts(x, y, ww, wh), dark ? '#000' : '#fff');
+      if (!dark && Math.random() < 0.4) {
+        wpath(c, [[x + ww / 2, y], [x + ww / 2, y + wh]], false, 0.6);
+        wpath(c, [[x, y + wh / 2], [x + ww, y + wh / 2]], false, 0.6);
+      }
+    };
+    const grid = (ww, wh, gx, gy, reserveBottom) => {
+      const cols = Math.max(1, Math.floor((w - gx) / (ww + gx)));
+      const rows = Math.max(1, Math.floor((h - gy - reserveBottom) / (wh + gy)));
+      const sx = x0 + (w - (cols * ww + (cols - 1) * gx)) / 2;
+      for (let r = 0; r < rows; r++)
+        for (let k = 0; k < cols; k++)
+          win(sx + k * (ww + gx) + R(-1, 1), yt + gy + r * (wh + gy) + R(-1, 1), ww, wh);
+    };
+    const door = (dw, dh) => {
+      shape(rectPts(xm - dw / 2, yb - dh, dw, dh));
+      c.beginPath(); c.arc(xm + dw / 2 - 4, yb - dh / 2, 1.6, 0, 7); c.fillStyle = '#000'; c.fill();
+    };
+
+    if (type === 'maison') {
+      const rh = R(35, 60), ov = 7;
+      const chx = xm + (x1 - xm) * R(0.3, 0.55);
+      const ry = yt - rh * (1 - (chx - xm) / (x1 + ov - xm));
+      shape(rectPts(chx, ry - 18, 12, yt - ry + 18));
+      shape(rectPts(x0, yt, w, h));
+      shape([[x0 - ov, yt], [xm, yt - rh], [x1 + ov, yt]]);
+      door(18, Math.min(28, h * 0.45));
+      const s = Math.min(16, w * 0.18);
+      win(x0 + w * 0.12, yt + h * 0.22, s, s);
+      win(x1 - w * 0.12 - s, yt + h * 0.22, s, s);
+      // fumée
+      c.lineWidth = 1.6;
+      for (let k = 0; k < 3; k++) {
+        c.beginPath(); c.arc(chx + 6 + k * 5, ry - 26 - k * 11, 4 + k * 1.5, 0, 6.6); c.stroke();
+      }
+    } else if (type === 'tour') {
+      const ah = R(30, 70);
+      c.lineWidth = 2.2;
+      wpath(c, [[xm, yt], [xm, yt - ah]], false, 0.8);
+      c.beginPath(); c.arc(xm, yt - ah - 3, 3.5, 0, 7); c.fillStyle = '#000'; c.fill();
+      shape(rectPts(x0, yt, w, h));
+      grid(8, 11, 7, 10, 20);
+    } else if (type === 'usine') {
+      const chH = R(50, 85);
+      shape(rectPts(x1 - 24, yt - chH, 14, chH));
+      for (let k = 1; k < 3; k++) wpath(c, [[x1 - 24, yt - chH + k * 12], [x1 - 10, yt - chH + k * 12]], false, 0.6);
+      const n = Math.max(2, Math.round(w / 32)), tw = w / n;
+      const roof = [[x0, yb], [x0, yt]];
+      for (let k = 0; k < n; k++) { roof.push([x0 + k * tw, yt - 20]); roof.push([x0 + (k + 1) * tw, yt]); }
+      roof.push([x1, yb]);
+      shape(roof);
+      const s = 13, cols = Math.max(1, Math.floor((w - 10) / (s + 10)));
+      for (let k = 0; k < cols; k++) win(x0 + 10 + k * (s + 10), yt + 16, s, s);
+      door(24, Math.min(30, h * 0.4));
+    } else {
+      shape(rectPts(x0, yt, w, h));
+      wpath(c, [[x0 - 5, yt], [x1 + 5, yt]], false, 0.8);
+      grid(12, 14, 9, 12, 34);
+      door(22, 28);
+    }
+
+    // masque : quelles cellules contiennent encore du bâtiment ?
+    const cols = Math.ceil(ow / CELL), rows = Math.ceil(oh / CELL);
+    const mask = new Uint8Array(cols * rows);
+    const data = c.getImageData(0, 0, can.width, can.height).data;
+    let alive = 0;
+    for (let cy = 0; cy < rows; cy++)
+      for (let cx = 0; cx < cols; cx++) {
+        const px = Math.min(can.width - 1, Math.floor((cx + 0.5) * CELL * dpr));
+        const py = Math.min(can.height - 1, Math.floor((cy + 0.5) * CELL * dpr));
+        if (data[(py * can.width + px) * 4 + 3] > 40) { mask[cy * cols + cx] = 1; alive++; }
+      }
+
+    return { ox, oy, ow, oh, can, c, mask, cols, rows, alive, total: alive, born: now, dying: 0, dead: false };
+  }
+
+  function pickTarget(b) {
+    const { cols, rows, mask } = b;
+    for (let k = 0; k < 500; k++) {
+      const i = (Math.random() * mask.length) | 0;
+      if (!mask[i]) continue;
+      const cx = i % cols, cy = (i / cols) | 0;
+      if (cx === 0 || cy === 0 || cx === cols - 1 || cy === rows - 1 ||
+          !mask[i - 1] || !mask[i + 1] || !mask[i - cols] || !mask[i + cols]) {
+        return { x: b.ox + (cx + 0.5) * CELL, y: Math.min(groundY, b.oy + (cy + 0.5) * CELL) };
+      }
+    }
+    return null;
+  }
+
+  function bite(b, wx, wy) {
+    const lx = wx - b.ox, ly = wy - b.oy, r = R(6, 9);
+    const circles = [[lx, ly, r]];
+    for (let k = 0; k < 3; k++) {
+      const a = R(0, Math.PI * 2);
+      circles.push([lx + Math.cos(a) * r * 0.75, ly + Math.sin(a) * r * 0.75, r * R(0.4, 0.6)]);
+    }
+    const c = b.c;
+    c.save();
+    c.globalCompositeOperation = 'destination-out';
+    for (const [x, y, rr] of circles) { c.beginPath(); c.arc(x, y, rr, 0, 7); c.fill(); }
+    c.globalCompositeOperation = 'source-atop';
+    c.lineWidth = 2; c.strokeStyle = '#000';
+    for (const [x, y, rr] of circles) { c.beginPath(); c.arc(x, y, rr + 1.1, 0, 7); c.stroke(); }
+    c.restore();
+
+    for (const [x, y, rr] of circles) {
+      const rad = rr + 1;
+      const cx0 = Math.max(0, Math.floor((x - rad) / CELL)), cx1 = Math.min(b.cols - 1, Math.floor((x + rad) / CELL));
+      const cy0 = Math.max(0, Math.floor((y - rad) / CELL)), cy1 = Math.min(b.rows - 1, Math.floor((y + rad) / CELL));
+      for (let cy = cy0; cy <= cy1; cy++)
+        for (let cx = cx0; cx <= cx1; cx++) {
+          const i = cy * b.cols + cx;
+          if (b.mask[i] && Math.hypot((cx + 0.5) * CELL - x, (cy + 0.5) * CELL - y) <= rad) { b.mask[i] = 0; b.alive--; }
+        }
+    }
+    for (let k = 0; k < 3; k++) addCrumb(wx, wy);
+    if (!b.dying && b.alive / b.total < 0.2) {
+      b.dying = now;
+      eaten++;
+      for (let k = 0; k < 25; k++) {
+        const t = pickTarget(b);
+        if (t) addCrumb(t.x, t.y);
+      }
+    }
+  }
+
+  /* ---------- miettes ---------- */
+  function addCrumb(x, y) {
+    if (crumbs.length > 400) crumbs.shift();
+    crumbs.push({ x, y, vx: R(-40, 40), vy: R(-80, -10), s: R(1.5, 3.2), rest: 0 });
+  }
+
+  /* ---------- fourmilière ---------- */
+  function buildHill(size) {
+    const w = 34 + size * 0.7, h = 14 + size * 0.28;
+    const pts = [];
+    for (let k = 0; k <= 16; k++) {
+      const a = Math.PI - (k / 16) * Math.PI;
+      pts.push([hill.x + Math.cos(a) * w + R(-1.5, 1.5), groundY - Math.sin(a) * h + R(-1.5, 1.5)]);
+    }
+    hill.pts = pts; hill.w = w; hill.h = h;
+  }
+
+  /* ---------- fourmis ---------- */
+  function newAnt(x, y, falling) {
+    return {
+      x, y, ang: R(0, 6.28), state: falling ? 'fall' : 'think', vy: 0, path: [],
+      speed: R(35, 60), phase: R(0, 6.28), target: null, tb: null, on: null,
+      chew: 0, carry: false, size: R(0.8, 1.15), wander: false,
+    };
+  }
+
+  function route(a, tx, ty, sameWall) {
+    if (sameWall || Math.abs(a.x - tx) < 1) return [[tx, ty]];
+    const p = [];
+    if (a.y < groundY - 0.5) p.push([a.x, groundY]);
+    p.push([tx, groundY]);
+    if (ty < groundY - 0.5) p.push([tx, ty]);
+    return p;
+  }
+
+  function think(a) {
+    a.target = null; a.tb = null; a.wander = false;
+    if (a.carry) {
+      a.path = route(a, hill.x + R(-6, 6), groundY, false);
+      a.state = 'walk';
+      return;
+    }
+    const cands = [];
+    for (const s of slots) {
+      const b = s.b;
+      if (b && !b.dying && now - b.born > 1.4) cands.push(b);
+    }
+    let b = null;
+    if (cands.length) {
+      let sum = 0;
+      const ws = cands.map(c => { const d = Math.abs(c.ox + c.ow / 2 - a.x); const w = 1 / (1 + d / 180); sum += w; return w; });
+      let r = Math.random() * sum;
+      for (let i = 0; i < cands.length; i++) { r -= ws[i]; if (r <= 0) { b = cands[i]; break; } }
+      b = b || cands[cands.length - 1];
+    }
+    const t = b && pickTarget(b);
+    if (t) {
+      a.target = t; a.tb = b;
+      a.path = route(a, t.x, t.y, a.on === b && a.y < groundY - 0.5);
+    } else {
+      a.wander = true;
+      a.path = route(a, Math.max(10, Math.min(W - 10, a.x + R(-120, 120))), groundY, false);
+    }
+    a.state = 'walk';
+  }
+
+  function updateAnt(a, dt) {
+    if (a.state === 'fall') {
+      a.vy += 900 * dt; a.y += a.vy * dt; a.ang += dt * 8;
+      if (a.y >= groundY) { a.y = groundY; a.ang = 0; a.state = 'think'; }
+      return;
+    }
+    if (a.state === 'think') { think(a); return; }
+    if (a.tb && (a.tb.dying || a.tb.dead)) { a.state = 'think'; a.on = a.y < groundY - 0.5 ? a.on : null; }
+    if (a.state === 'walk') {
+      let step = a.speed * dt;
+      while (step > 0 && a.path.length) {
+        const [px, py] = a.path[0];
+        const dx = px - a.x, dy = py - a.y, d = Math.hypot(dx, dy);
+        if (d < 0.01) { a.path.shift(); continue; }
+        const targetAng = Math.atan2(dy, dx);
+        let da = targetAng - a.ang;
+        da = Math.atan2(Math.sin(da), Math.cos(da));
+        a.ang += da * Math.min(1, dt * 14);
+        const m = Math.min(step, d);
+        a.x += dx / d * m; a.y += dy / d * m; step -= m;
+        if (m === d) a.path.shift();
+      }
+      if (a.y >= groundY - 0.5) a.on = null; else if (a.tb) a.on = a.tb;
+      if (!a.path.length) {
+        if (a.carry) { a.carry = false; hill.size = Math.min(80, hill.size + 0.15); if (++hill.n % 10 === 0) buildHill(hill.size); a.state = 'think'; }
+        else if (a.target) { a.state = 'chew'; a.chew = R(0.5, 1.3); }
+        else a.state = 'think';
+      }
+    } else if (a.state === 'chew') {
+      a.chew -= dt;
+      if (a.chew <= 0) {
+        if (a.tb && !a.tb.dying) { bite(a.tb, a.target.x, a.target.y); a.carry = true; }
+        a.state = 'think';
+      }
+    }
+  }
+
+  function drawAnt(a, t) {
+    const vertical = Math.abs(Math.sin(a.ang)) > 0.7;
+    ctx.save();
+    ctx.translate(a.x, a.y - (vertical || a.state === 'fall' ? 0 : 5 * a.size));
+    ctx.rotate(a.ang);
+    ctx.scale(a.size, a.size);
+    if (a.state === 'chew') ctx.translate(Math.sin(t * 40 + a.phase) * 0.8, 0);
+    const moving = a.state === 'walk' || a.state === 'fall';
+    const p = moving ? Math.sin(t * a.speed * 0.4 + a.phase) : 0;
+
+    ctx.strokeStyle = '#000'; ctx.fillStyle = '#000';
+    ctx.lineWidth = 1.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (let i = -1; i <= 1; i++) {
+      const s = (i === 0 ? p : -p) * 3;
+      ctx.moveTo(i * 1.5, 0); ctx.lineTo(i * 3.5 + s, -5); ctx.lineTo(i * 6 + s * 1.3, -8.5);
+      ctx.moveTo(i * 1.5, 0); ctx.lineTo(i * 3.5 - s, 5); ctx.lineTo(i * 6 - s * 1.3, 8.5);
+    }
+    ctx.moveTo(8, -1.5); ctx.lineTo(11, -5); ctx.lineTo(14, -4.5);
+    ctx.moveTo(8, 1.5); ctx.lineTo(11, 5); ctx.lineTo(14, 4.5);
+    ctx.stroke();
+
+    ctx.beginPath(); ctx.ellipse(-8, 0, 6, 4.5, 0, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(0, 0, 3.2, 2.5, 0, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(6, 0, 3.6, 3.2, 0, 0, 7); ctx.fill();
+
+    if (a.carry) {
+      ctx.fillStyle = '#fff'; ctx.lineWidth = 1.3;
+      ctx.beginPath(); ctx.rect(10, -2.5, 5, 5); ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /* ---------- mise en place ---------- */
+  function setup() {
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    W = window.innerWidth; H = window.innerHeight;
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = W + 'px'; cv.style.height = H + 'px';
+    groundY = Math.round(H * 0.92);
+
+    groundPts = [];
+    for (let x = -10; x <= W + 10; x += 14) groundPts.push([x, groundY + R(-1, 1)]);
+    pebbles = [];
+    for (let k = 0; k < W / 40; k++) pebbles.push([R(0, W), groundY + R(12, H - groundY - 10), R(2, 6), R(1.5, 3.5)]);
+
+    // coucher de soleil
+    const sr = Math.min(W, H) * 0.2;
+    sun = { x: W * 0.66, r: sr, pts: [] };
+    for (let k = 0; k <= 40; k++) {
+      const a = (k / 40) * Math.PI * 2;
+      sun.pts.push([Math.cos(a) * (sr + R(-1.5, 1.5)), Math.sin(a) * (sr + R(-1.5, 1.5))]);
+    }
+
+    hill = { x: Math.max(55, Math.min(W * 0.1, 120)), size: 10, n: 0 };
+    buildHill(hill.size);
+
+    slots = [];
+    let x = hill.x + 70;
+    while (true) {
+      const w = R(75, 170);
+      if (x + w > W - 15) break;
+      slots.push({ x, w, b: null, next: now + slots.length * 0.35 });
+      x += w + R(18, 50);
+    }
+    if (!slots.length) slots.push({ x: hill.x + 60, w: Math.max(60, W - hill.x - 80), b: null, next: now });
+
+    ants = []; crumbs = [];
+    nextHatch = now;
+    airship = makeAirship();
+  }
+
+  /* ---------- dirigeable ---------- */
+  function makeAirship() {
+    const w = Math.round(Math.max(100, Math.min(W * 0.2, 180))), h = Math.round(w * 0.32);
+    const cw = Math.ceil(w * 1.25), ch = Math.ceil(h * 1.95);
+    const can = document.createElement('canvas');
+    can.width = cw * dpr; can.height = ch * dpr;
+    const c = can.getContext('2d');
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.lineWidth = 2.2; c.lineJoin = c.lineCap = 'round'; c.strokeStyle = '#000';
+    const cx = w * 0.15 + w / 2, cy = h * 0.85, ex = cx - w / 2;
+    const shape = pts => {
+      c.beginPath(); pts.forEach((p, i) => i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1]));
+      c.closePath(); c.fillStyle = '#fff'; c.fill(); sketch(c, pts, true);
+    };
+    // ailerons de queue (derrière le ballon)
+    shape([[ex + w * 0.14, cy - h * 0.3], [ex - w * 0.04, cy - h * 0.78], [ex - w * 0.11, cy - h * 0.78], [ex - w * 0.06, cy - h * 0.08]]);
+    shape([[ex + w * 0.14, cy + h * 0.3], [ex - w * 0.04, cy + h * 0.78], [ex - w * 0.11, cy + h * 0.78], [ex - w * 0.06, cy + h * 0.08]]);
+    // cordages + nacelle
+    const gx = cx - w * 0.14, gy = cy + h * 0.5 + 7, gw = w * 0.28, gh = h * 0.24;
+    c.lineWidth = 1.4;
+    wpath(c, [[cx - w * 0.2, cy + h * 0.38], [gx, gy]], false, 0.5);
+    wpath(c, [[cx + w * 0.2, cy + h * 0.38], [gx + gw, gy]], false, 0.5);
+    c.lineWidth = 2.2;
+    shape([[gx, gy], [gx + gw, gy], [gx + gw - 4, gy + gh], [gx + 4, gy + gh]]);
+    const ws = Math.min(gh * 0.45, 7);
+    for (let k = 0; k < 3; k++) {
+      c.beginPath(); c.rect(gx + gw * (0.2 + k * 0.25) - ws / 2, gy + gh * 0.3, ws, ws);
+      c.fillStyle = '#000'; c.fill();
+    }
+    // ballon
+    const env = [];
+    for (let k = 0; k < 44; k++) {
+      const a = (k / 44) * Math.PI * 2;
+      // un peu plus pointu à l'arrière
+      const rx = w / 2 * (Math.cos(a) < 0 ? 1 - 0.06 * Math.abs(Math.cos(a)) : 1);
+      env.push([cx + Math.cos(a) * rx, cy + Math.sin(a) * h / 2]);
+    }
+    shape(env);
+    // coutures aux deux bouts
+    c.lineWidth = 1.4;
+    for (const f of [-0.38, 0.4]) {
+      c.beginPath(); c.ellipse(cx + f * w, cy, w * 0.03, h * 0.47, 0, 0, 7); c.stroke();
+    }
+    return {
+      can, cw, ch, w, h, cx, cy,
+      prop: [gx - 3, gy + gh / 2], propR: gh * 0.75,
+      x: W * R(0.05, 0.3), y: Math.max(90, groundY * 0.22), speed: R(9, 14),
+      // chaque lettre un peu de travers, comme griffonnée au marqueur
+      jit: [...SLOGAN].map(() => [R(-0.5, 1), R(-0.07, 0.07), R(-0.12, 0.12), R(0.92, 1.1)]),
+    };
+  }
+
+  function drawAirship(dt) {
+    const a = airship;
+    a.x += a.speed * dt;
+    if (a.x > W + 20) a.x = -a.cw - 20;
+    const x = a.x, y = a.y + Math.sin(now * 0.6) * 3;
+    ctx.drawImage(a.can, x, y, a.cw, a.ch);
+    // slogan
+    ctx.fillStyle = '#000';
+    const fs = Math.round(a.h * 0.5);
+    ctx.font = `${fs}px "Dokdo", cursive`;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    const chars = [...SLOGAN], widths = chars.map(ch => ctx.measureText(ch).width);
+    let tx = x + a.cx - widths.reduce((u, v) => u + v, 0) / 2;
+    chars.forEach((ch, i) => {
+      const [dx, dy, rot, sc] = a.jit[i];
+      ctx.save();
+      ctx.translate(tx + widths[i] / 2 + dx, y + a.cy + 1 + dy * fs);
+      ctx.rotate(rot); ctx.scale(sc, sc);
+      ctx.fillText(ch, -widths[i] / 2, 0);
+      ctx.restore();
+      tx += widths[i];
+    });
+    // hélice qui tourne
+    const ry = a.propR * Math.abs(Math.sin(now * 14));
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(x + a.prop[0], y + a.prop[1], 2.2, Math.max(0.5, ry), 0, 0, 7);
+    ctx.fillStyle = '#fff'; ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(x + a.prop[0] + 1, y + a.prop[1], 1.8, 0, 7); ctx.fillStyle = '#000'; ctx.fill();
+  }
+
+  /* ---------- boucle ---------- */
+  let last = performance.now();
+  function frame(ms) {
+    const dt = Math.min(0.05, (ms - last) / 1000); last = ms; now += dt;
+
+    // nouveaux bâtiments
+    for (const s of slots) {
+      if (s.b && s.b.dying && now - s.b.dying > 0.7) { s.b.dead = true; s.b = null; s.next = now + R(2, 5); }
+      if (!s.b && now >= s.next) s.b = makeBuilding(s);
+    }
+    // la fourmilière pond
+    if (now >= nextHatch && ants.length < 40) {
+      ants.push(newAnt(hill.x, groundY, false));
+      nextHatch = now + (ants.length < 10 ? 0.6 : 5);
+    }
+    for (const a of ants) updateAnt(a, dt);
+    for (const c of crumbs) {
+      if (c.rest) { c.rest += dt; continue; }
+      c.vy += 600 * dt; c.x += c.vx * dt; c.y += c.vy * dt;
+      if (c.y >= groundY - c.s / 2) { c.y = groundY - c.s / 2; c.rest = 0.001; }
+    }
+    crumbs = crumbs.filter(c => c.rest < 4);
+
+    // dessin
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 2.2; ctx.lineCap = ctx.lineJoin = 'round';
+
+    // ciel + soleil (coupés à la ligne du sol)
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, 0, W, groundY); ctx.clip();
+    // hauteur du soleil : 1 = haut, 0 = couché. Cycle de 6 min, commence haut et descend.
+    const hgt = 0.5 + 0.5 * Math.cos((now / SUN_CYCLE) * Math.PI * 2);
+    sun.y = groundY + sun.r + 60 - hgt * (sun.r * 2.4 + 60);
+    const sky = ctx.createLinearGradient(0, 0, 0, groundY);
+    sky.addColorStop(0, mix('#c2183a', '#ff5a1f', hgt));
+    sky.addColorStop(0.5, mix('#ff3d1a', '#ff8a2a', hgt));
+    sky.addColorStop(1, mix('#ff7a1a', '#ffd04a', hgt));
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, groundY);
+    const rot = now * 0.06;
+    ctx.beginPath();
+    for (let k = 0; k < 14; k++) {
+      const a = rot + (k / 14) * Math.PI * 2;
+      const r1 = sun.r + 14, r2 = sun.r + (k % 2 ? 34 : 52);
+      ctx.moveTo(sun.x + Math.cos(a) * r1, sun.y + Math.sin(a) * r1);
+      ctx.lineTo(sun.x + Math.cos(a) * r2, sun.y + Math.sin(a) * r2);
+    }
+    ctx.lineWidth = 2.6; ctx.stroke();
+    ctx.fillStyle = '#ffd23a';
+    ctx.beginPath(); sun.pts.forEach((p, i) => i ? ctx.lineTo(sun.x + p[0], sun.y + p[1]) : ctx.moveTo(sun.x + p[0], sun.y + p[1]));
+    ctx.closePath(); ctx.fill(); ctx.lineWidth = 2.2; ctx.stroke();
+
+    drawAirship(dt);
+    ctx.lineWidth = 2.2;
+
+    ctx.restore();
+    ctx.lineWidth = 2.2;
+
+    for (const s of slots) {
+      const b = s.b; if (!b) continue;
+      const age = now - b.born;
+      ctx.save();
+      if (b.dying) ctx.globalAlpha = Math.max(0, 1 - (now - b.dying) / 0.7);
+      if (age < 1.2) {
+        const k = 1 - Math.pow(1 - age / 1.2, 3);
+        const rh = Math.max(1, b.oh * k), sy = b.oh - rh;
+        ctx.drawImage(b.can, 0, sy * dpr, b.can.width, rh * dpr, b.ox, b.oy + sy, b.ow, rh);
+      } else {
+        ctx.drawImage(b.can, b.ox, b.oy, b.ow, b.oh);
+      }
+      ctx.restore();
+    }
+
+    // sol
+    ctx.beginPath();
+    groundPts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+    ctx.stroke();
+    ctx.lineWidth = 1.4;
+    for (const [px, py, rx, ry] of pebbles) { ctx.beginPath(); ctx.ellipse(px, py, rx, ry, 0, 0, 7); ctx.stroke(); }
+
+    // miettes
+    ctx.lineWidth = 1;
+    for (const c of crumbs) {
+      ctx.globalAlpha = c.rest > 3 ? 4 - c.rest : 1;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.rect(c.x - c.s / 2, c.y - c.s / 2, c.s, c.s); ctx.fill(); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // fourmilière
+    ctx.lineWidth = 2.2; ctx.fillStyle = '#fff';
+    ctx.beginPath(); hill.pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.ellipse(hill.x, groundY - hill.h + 4, 6, 3, 0, 0, 7); ctx.fill();
+
+    for (const a of ants) drawAnt(a, now);
+
+    const txt = `${ants.length} fourmi${ants.length > 1 ? 's' : ''}<br>${eaten} bâtiment${eaten > 1 ? 's' : ''} mangé${eaten > 1 ? 's' : ''}`;
+    if (txt !== lastCount) { compte.innerHTML = txt; lastCount = txt; }
+
+    requestAnimationFrame(frame);
+  }
+
+  /* ---------- interactions ---------- */
+  cv.addEventListener('pointerdown', e => {
+    for (let k = 0; k < 3 && ants.length < MAX_ANTS; k++) {
+      ants.push(newAnt(e.clientX + R(-10, 10), Math.min(e.clientY, groundY) + R(-10, 10), true));
+    }
+  });
+
+  let rt;
+  window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(setup, 200); });
+
+  setup();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
